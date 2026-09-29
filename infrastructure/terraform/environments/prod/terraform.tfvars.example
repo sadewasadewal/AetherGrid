@@ -1,0 +1,10 @@
+project_name       = "aethergrid"
+environment        = "prod"
+aws_region         = "us-east-1"
+vpc_cidr           = "10.0.0.0/16"
+enable_nat_gateway = true
+single_nat_gateway = false
+certificate_arn    = "arn:aws:acm:us-east-1:123456789012:certificate/your-cert-id"
+backend_image      = "123456789012.dkr.ecr.us-east-1.amazonaws.com/aethergrid-backend:latest"
+frontend_image     = "123456789012.dkr.ecr.us-east-1.amazonaws.com/aethergrid-frontend:latest"
+desired_count      = 2

@@ -1,0 +1,64 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  backend-test:
+    name: Backend Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: app/backend/package-lock.json
+
+      - name: Install Backend Dependencies
+        working-directory: app/backend
+        run: npm ci
+
+      - name: Typecheck Backend
+        working-directory: app/backend
+        run: npm run lint
+
+      - name: Execute Backend Unit Tests
+        working-directory: app/backend
+        run: npm test
+
+      - name: Build Backend
+        working-directory: app/backend
+        run: npm run build
+
+  frontend-test:
+    name: Frontend Lint & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        working-directory: app/frontend
+        run: npm ci
+
+      - name: Typecheck Frontend
+        working-directory: app/frontend
+        run: npm run typecheck
+
+      - name: Build Next.js Static & Standalone Bundle
+        working-directory: app/frontend
+        run: npm run build

@@ -1,0 +1,97 @@
+services:
+  # ========================================================
+  # Database: PostgreSQL 15 (Local Development Mirror of RDS)
+  # ========================================================
+  db:
+    image: postgres:15-alpine
+    container_name: aethergrid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aethergrid_user
+      POSTGRES_PASSWORD: aethergrid_secure_password
+      POSTGRES_DB: aethergrid_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - aethergrid-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aethergrid_user -d aethergrid_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ========================================================
+  # Backend API: Node.js + Express (ECS Fargate Mirror)
+  # ========================================================
+  backend:
+    build:
+      context: ./app/backend
+      dockerfile: Dockerfile
+    container_name: aethergrid-backend
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      ENVIRONMENT: local-dev
+      APP_VERSION: 1.0.0
+      COMMIT_SHA: docker-compose-local
+      AWS_REGION: us-east-1
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: aethergrid_user
+      DB_PASSWORD: aethergrid_secure_password
+      DB_NAME: aethergrid_db
+      DB_SSL: "false"
+      CORS_ORIGIN: "*"
+    ports:
+      - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - aethergrid-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ========================================================
+  # Frontend: Next.js Control Plane UI
+  # ========================================================
+  frontend:
+    build:
+      context: ./app/frontend
+      dockerfile: Dockerfile
+    container_name: aethergrid-frontend
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: http://backend:4000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - aethergrid-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  aethergrid-net:
+    driver: bridge

@@ -1,0 +1,134 @@
+name: Continuous Deployment (ECS Fargate)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target AWS environment (dev/prod)'
+        required: true
+        default: 'dev'
+
+permissions:
+  id-token: write # Required for AWS OIDC authentication
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to Amazon ECS Fargate
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      ROLE_TO_ASSUME: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+      ALB_DNS_NAME: ${{ secrets.ALB_DNS_NAME }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 1. Authenticate with AWS via OpenID Connect (OIDC)
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          role-session-name: GitHubActions-AetherGrid-Deployment
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      # 2. Log in to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 3. Build & Push Backend Container to ECR
+      - name: Build and Push Backend Image
+        id: build-backend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: aethergrid-backend
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            --build-arg COMMIT_SHA=${{ github.sha }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            ./app/backend
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # 4. Build & Push Frontend Container to ECR
+      - name: Build and Push Frontend Image
+        id: build-frontend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: aethergrid-frontend
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            ./app/frontend
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # 5. Fetch current ECS Task Definitions
+      - name: Download Active Task Definitions
+        run: |
+          aws ecs describe-task-definition --task-definition aethergrid-dev-backend \
+            --query taskDefinition > task-def-backend.json
+          aws ecs describe-task-definition --task-definition aethergrid-dev-frontend \
+            --query taskDefinition > task-def-frontend.json
+
+      # 6. Render updated container images in Task Definitions
+      - name: Render Backend Task Definition
+        id: render-backend-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def-backend.json
+          container-name: backend
+          image: ${{ steps.build-backend.outputs.image }}
+
+      - name: Render Frontend Task Definition
+        id: render-frontend-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def-frontend.json
+          container-name: frontend
+          image: ${{ steps.build-frontend.outputs.image }}
+
+      # 7. Deploy to Amazon ECS Services & Wait for Stability
+      - name: Deploy Backend to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-backend-task-def.outputs.task-definition }}
+          service: aethergrid-dev-backend-svc
+          cluster: aethergrid-dev-cluster
+          wait-for-service-stability: true
+
+      - name: Deploy Frontend to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-frontend-task-def.outputs.task-definition }}
+          service: aethergrid-dev-frontend-svc
+          cluster: aethergrid-dev-cluster
+          wait-for-service-stability: true
+
+      # 8. Post-Deployment Smoke Test Health Check
+      - name: Verify Application Health via ALB Ingress
+        run: |
+          echo "Verifying health endpoint at http://${ALB_DNS_NAME}/api/health..."
+          for i in {1..12}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS_NAME}/api/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Smoke test passed with HTTP 200 OK!"
+              exit 0
+            fi
+            echo "Waiting for ALB target group convergence (Status: $STATUS)... attempt $i/12"
+            sleep 10
+          done
+          echo "Health check verification timed out"
+          exit 1
